@@ -18,6 +18,13 @@
   var PITCH_MIN = 6.0;           // permite mirar casi al nivel del suelo
   var PITCH_MAX = 85.0;
   var ALTA_ALT = 6000;           // altitud de la vista aérea (mapa + nubes visibles)
+  var ALT_GLOBAL = 2400000;      // altitud del arranque: el globo entero con la nube
+  // Transición automática aérea/calle según la altura de la cámara:
+  // por debajo de ENTRADA se activa la calle, por encima de SALIDA vuelve
+  // el mapa. La histéresis evita parpadeos al acercar o alejar la rueda.
+  var UMBRAL_ENTRADA_CALLE = 150;
+  var UMBRAL_SALIDA_CALLE = 260;
+  var PITCH_ENTRADA = 20;        // inclinación al entrar en la calle
   var RADIO_EDIFICIOS = 280;
   var MAX_EDIFICIOS = 600;
   var AREA_MINIMA_M2 = 30;
@@ -68,6 +75,7 @@
   var capaBaseActual = null;
   var espejoActual = 0;
   var ultimoCentroEdificios = null;
+  var volando = false;           // true mientras un flyTo está en movimiento
   var ultimoPeticion = null;     // últimos parámetros con los que se calculó
   var pidiendo = false;
   var esperaTimer = null;
@@ -82,15 +90,38 @@
   var elFecha = document.getElementById('leyenda-fecha');
   var elLectura = document.getElementById('lectura');
 
+  // Superficie de errores: nada puede fallar en silencio. Cualquier error de
+  // la pagina, promesa rechazada sin capturar o fallo del bucle de render
+  // se escribe aqui con palabras, para que se vea sin abrir la consola.
+  var errorVisiblePuesto = false;
+  function errorVisible(txt) {
+    if (errorVisiblePuesto) return;
+    errorVisiblePuesto = true;
+    fijarEstado(txt);
+  }
+  window.addEventListener('error', function (ev) {
+    var m = ev && ev.message ? ev.message : 'error desconocido';
+    errorVisible('Error en la pagina, avisa a Sandro con esto: ' + m);
+  });
+  window.addEventListener('unhandledrejection', function (ev) {
+    var r = ev && ev.reason;
+    var m = r && r.message ? r.message : String(r || 'fallo desconocido');
+    if (m === 'sin-imagen') return; // ya lo gestiona recalcularNube
+    errorVisible('Fallo sin capturar, avisa a Sandro con esto: ' + m);
+  });
+
   function actualizarLectura() {
     if (!elLectura || !viewer) return;
     var pos = viewer.camera.positionCartographic;
     if (!pos) return;
     var lat = deg(pos.latitude), lon = deg(pos.longitude);
+    var pitchV = modoCalle
+      ? Math.round(clamp(deg(viewer.camera.pitch), PITCH_MIN, PITCH_MAX))
+      : Math.round(deg(viewer.camera.pitch));
     elLectura.textContent = Math.abs(lat).toFixed(4) + ' ' + (lat >= 0 ? 'N' : 'S') +
       ' · ' + Math.abs(lon).toFixed(4) + ' ' + (lon >= 0 ? 'E' : 'O') +
       ' · giro ' + Math.round(normaliza(deg(viewer.camera.heading))) +
-      '° · inclinación ' + Math.round(clamp(deg(viewer.camera.pitch), PITCH_MIN, PITCH_MAX)) + '°';
+      '° · inclinación ' + pitchV + '°';
   }
 
   function fijarEstado(txt) { elEstado.textContent = txt; }
@@ -228,12 +259,14 @@
     canvas.width = nx * TILE_PX; canvas.height = ny * TILE_PX;
     var ctx = canvas.getContext('2d', { willReadFrequently: true });
     var trabajos = [];
+    var fallos = 0;
     for (var dy = 0; dy < ny; dy++) {
       for (var dx = 0; dx < nx; dx++) {
         trabajos.push((function (x, y, px, py) {
           return cargaImagen(urlTesela(z, y, x)).then(function (img) {
             ctx.drawImage(img, px, py);
           }, function () {
+            fallos++;
             ctx.fillStyle = 'rgb(32,32,48)';
             ctx.fillRect(px, py, TILE_PX, TILE_PX);
           });
@@ -241,6 +274,11 @@
       }
     }
     return Promise.all(trabajos).then(function () {
+      // si ninguna tesela llego, la red esta bloqueando GIBS: mejor avisar
+      // que pintar un cielo falso
+      if (fallos === trabajos.length && trabajos.length > 0) {
+        throw new Error('sin-imagen');
+      }
       return {
         canvas: canvas,
         lonMin: -180 + t0[0] * ancho,
@@ -485,6 +523,23 @@
     viewer.camera.frustum.fov = rad(FOVH);
     viewer.camera.percentageChanged = 0.15;
     viewer.camera.moveEnd.addEventListener(alSoltarCamara);
+    // si el bucle de render tropieza (por ejemplo con un driver concreto),
+    // lo mostramos en pantalla y lo rearrancamos en vez de dejar la escena
+    // congelada sin explicacion
+    viewer.scene.renderError.addEventListener(function () {
+      errorVisiblePuesto = false;
+      errorVisible('El renderizado se detuvo, rearrancandolo');
+      setTimeout(function () {
+        try { viewer.useDefaultRenderLoop = true; } catch (e0) {}
+      }, 500);
+    });
+    // progreso real de la descarga del mapa, para que el arranque no parezca
+    // una pantalla muerta mientras suben las teselas
+    viewer.scene.globe.tileLoadProgressEvent.addEventListener(function (encola) {
+      if (encola > 0 && !pidiendo && elEstado) {
+        fijarEstado('Descargando el mapa, quedan ' + encola + ' teselas');
+      }
+    });
     // manija mínima de depuración, útil para verificar la coherencia en consola
     window.__mnViewer = viewer;
     window.__mnStats = function () {
@@ -492,14 +547,28 @@
     };
   }
 
-  function vistaAerea() {
+  function vistaAerea(altura) {
     modoCalle = false;
     if (nubePrimitive) nubePrimitive.show = false;
     if (capaAereaInst) capaAereaInst.show = true;
-    document.getElementById('btn-modo').textContent = 'Bajar a la calle';
+    var bm = document.getElementById('btn-modo');
+    if (bm) bm.textContent = 'Bajar a la calle';
     viewer.camera.setView({
-      destination: Cesium.Cartesian3.fromDegrees(centro.lon, centro.lat, groundH + ALTA_ALT),
+      destination: Cesium.Cartesian3.fromDegrees(centro.lon, centro.lat,
+        groundH + (altura || ALTA_ALT)),
       orientation: { heading: 0, pitch: rad(-90), roll: 0 }
+    });
+    actualizarLectura();
+  }
+
+  // Vuelo suave a un punto y altura dados. Al terminar, moveEnd llama a
+  // alSoltarCamara, que decide solo si toca modo calle o modo aéreo.
+  function volarA(lat, lon, altura) {
+    volando = true; // hasta que moveEnd confirme el final del vuelo
+    viewer.camera.flyTo({
+      destination: Cesium.Cartesian3.fromDegrees(lon, lat, groundH + altura),
+      orientation: { heading: 0, pitch: rad(-90), roll: 0 },
+      duration: 2.5
     });
   }
 
@@ -513,12 +582,15 @@
   function vistaCalle() {
     modoCalle = true;
     if (capaAereaInst) capaAereaInst.show = false;
-    document.getElementById('btn-modo').textContent = 'Subir al mapa';
+    var bm = document.getElementById('btn-modo');
+    if (bm) bm.textContent = 'Subir al mapa';
+    volando = true; // hasta que moveEnd confirme el aterrizaje del flyTo
     viewer.camera.flyTo({
       destination: Cesium.Cartesian3.fromDegrees(centro.lon, centro.lat, groundH + EYE),
       orientation: { heading: 0, pitch: rad(18), roll: 0 },
       duration: 2.0
     });
+    actualizarLectura();
   }
 
   // =========================================================================
@@ -805,7 +877,9 @@
     var heading = normaliza(deg(cam.heading));
     var pitch = clamp(deg(cam.pitch), PITCH_MIN, PITCH_MAX);
     var pos = cam.positionCartographic;
-    if (pos) {
+    if (pos && !volando) {
+      // solo se adopta la posicion de la camara cuando no hay vuelo en curso,
+      // si no el recalculo se haria sobre un punto intermedio del trayecto
       centro.lat = deg(pos.latitude);
       centro.lon = deg(pos.longitude);
     }
@@ -826,6 +900,10 @@
       .catch(function (err) {
         if (err && err.message === 'mira-arriba') {
           fijarEstado('Inclina la vista hacia el cielo para ver la nube');
+        } else if (err && err.message === 'sin-imagen') {
+          // GIBS no responde desde esta red: se dice claro y se ofrece el mapa
+          fijarEstado('No llegan las imagenes del satelite desde tu red, muestro el mapa');
+          vistaAerea();
         } else {
           fijarEstado('No pude generar la textura de nube ahora mismo');
         }
@@ -838,12 +916,54 @@
   }
 
   function alSoltarCamara() {
-    if (!modoCalle) return;
+    volando = false; // la cámara se detuvo: fin de flyTo o de arrastre
     var pos = viewer.camera.positionCartographic;
-    if (pos && pos.height < groundH + 1.2) {
+    if (!pos) return;
+    var hSobreSuelo = pos.height - groundH;
+    if (!modoCalle && hSobreSuelo < UMBRAL_ENTRADA_CALLE) {
+      // El usuario bajó con la rueda hasta el suelo: la calle se activa
+      // donde está, sin botones. Se adopta la posición de la cámara como
+      // centro y se pone la vista a altura de ojo mirando hacia arriba.
+      // La elevación se recarga antes de fijar la cámara, por si llegó
+      // arrastrando el mapa desde un lugar con otra altura del terreno.
+      centro.lat = deg(pos.latitude);
+      centro.lon = deg(pos.longitude);
+      modoCalle = true;
+      if (capaAereaInst) capaAereaInst.show = false;
+      if (nubePrimitive) nubePrimitive.show = true;
+      var hEntrada = normaliza(deg(viewer.camera.heading));
+      mirarCalle(centro.lat, centro.lon, hEntrada, PITCH_ENTRADA);
+      ultimoPeticion = null;
+      fijarEstado('A pie de calle · calculando la nube de este punto');
+      cargarElevacion(centro.lat, centro.lon)
+        .catch(function () {})
+        .then(function () {
+          if (!modoCalle) return; // ya volvió a subir con la rueda
+          mirarCalle(centro.lat, centro.lon, hEntrada, PITCH_ENTRADA);
+          cargarEdificios(centro.lat, centro.lon);
+          ultimoPeticion = null;
+          recalcularNube(true);
+          actualizarLectura();
+        });
+      actualizarLectura();
+      return;
+    }
+    if (modoCalle && hSobreSuelo > UMBRAL_SALIDA_CALLE) {
+      // El usuario subió con la rueda: vuelve el mapa con la capa de
+      // nubes del satélite, la escena continúa sin cortes.
+      modoCalle = false;
+      if (nubePrimitive) nubePrimitive.show = false;
+      if (capaAereaInst) capaAereaInst.show = true;
+      fijarEstado('Vista aérea con las mismas nubes · baja con la rueda hasta la calle');
+      actualizarLectura();
+      return;
+    }
+    if (!modoCalle) return;
+    if (pos.height < groundH + 1.2 || deg(viewer.camera.pitch) < PITCH_MIN) {
+      // Si la cámara quedó bajo el suelo o mirando hacia abajo (tras un
+      // vuelo o un zoom fuerte), se recoloca a altura de ojo mirando arriba.
       mirarCalle(centro.lat, centro.lon,
-        normaliza(deg(viewer.camera.heading)),
-        clamp(deg(viewer.camera.pitch), PITCH_MIN, PITCH_MAX));
+        normaliza(deg(viewer.camera.heading)), PITCH_ENTRADA);
     }
     if (ultimoCentroEdificios) {
       var dLat = centro.lat - ultimoCentroEdificios.lat;
@@ -861,18 +981,42 @@
   // Controles
   // =========================================================================
   function girar(dh, dp) {
-    if (!modoCalle) return;
     var cam = viewer.camera;
     var h = normaliza(deg(cam.heading) + dh);
-    var p = clamp(deg(cam.pitch) + dp, PITCH_MIN, PITCH_MAX);
-    mirarCalle(centro.lat, centro.lon, h, p);
+    if (modoCalle) {
+      var p = clamp(deg(cam.pitch) + dp, PITCH_MIN, PITCH_MAX);
+      mirarCalle(centro.lat, centro.lon, h, p);
+      if (esperaTimer) clearTimeout(esperaTimer);
+      esperaTimer = setTimeout(function () { recalcularNube(false); }, 450);
+    } else {
+      // en el aire las flechas tambien responden: giran la brujula e inclinan
+      // la camara hacia el horizonte para ver el relieve en 3D
+      var pa = clamp(deg(cam.pitch) + dp, -90, -15);
+      viewer.camera.setView({
+        destination: cam.position,
+        orientation: { heading: rad(h), pitch: rad(pa), roll: 0 }
+      });
+    }
     actualizarLectura();
-    if (esperaTimer) clearTimeout(esperaTimer);
-    esperaTimer = setTimeout(function () { recalcularNube(false); }, 450);
   }
 
   function initControles() {
-    document.getElementById('btn-modo').addEventListener('click', function () {
+    // El panel se puede cerrar con la × y reabrir con el botón flotante.
+    var elPanel = document.getElementById('panel');
+    var elBtnAbrir = document.getElementById('btn-abrir');
+    document.getElementById('btn-cerrar').addEventListener('click', function () {
+      elPanel.classList.add('oculto');
+      elBtnAbrir.classList.add('visible');
+    });
+    elBtnAbrir.addEventListener('click', function () {
+      elPanel.classList.remove('oculto');
+      elBtnAbrir.classList.remove('visible');
+    });
+    // El botón de modo ya no se muestra: la transición aérea/calle es
+    // automática por altura. Se conserva el manejador por si el elemento
+    // vuelve algún día al HTML.
+    var btnModo = document.getElementById('btn-modo');
+    if (btnModo) btnModo.addEventListener('click', function () {
       if (modoCalle) {
         vistaAerea();
         fijarEstado('Mapa con las mismas nubes · pulsa Bajar a la calle');
@@ -897,13 +1041,9 @@
         cargarElevacion(centro.lat, centro.lon).then(function () {
           return cargarEdificios(centro.lat, centro.lon);
         }).then(function () {
-          if (modoCalle) {
-            mirarCalle(centro.lat, centro.lon, 0, 18);
-            ultimoPeticion = null;
-            recalcularNube(true);
-          } else {
-            vistaAerea();
-          }
+          // Vuelo directo a pie de calle: al aterrizar, alSoltarCamara
+          // activa el modo calle y calcula la nube de ese punto.
+          volarA(centro.lat, centro.lon, 120);
         });
       }, function () {
         fijarEstado('No pude obtener tu posición');
@@ -923,15 +1063,13 @@
         .then(function () { return cargarEdificios(centro.lat, centro.lon); })
         .catch(function () {})
         .then(function () {
-          if (modoCalle) {
-            mirarCalle(centro.lat, centro.lon, 0, 18);
-            recalcularNube(true);
-          } else {
-            vistaAerea();
-            fijarEstado('Nubes reales del satélite sobre ' +
-              document.getElementById('sel-ciudad').options[
-                document.getElementById('sel-ciudad').selectedIndex].text);
-          }
+          // Vuelo a vista de barrio: con un giro de rueda más se entra
+          // en la calle y la transición automática hace el resto.
+          volarA(centro.lat, centro.lon, 600);
+          fijarEstado('Nubes reales del satélite sobre ' +
+            document.getElementById('sel-ciudad').options[
+              document.getElementById('sel-ciudad').selectedIndex].text +
+            ' · baja con la rueda hasta la calle');
         });
     });
     var slider = document.getElementById('slider-alt');
@@ -940,11 +1078,13 @@
       elAltValor.textContent = altitudNube.toLocaleString('es-ES');
     });
     slider.addEventListener('change', function () {
+      if (!modoCalle) {
+        fijarEstado('Altitud guardada, se aplica al bajar a la calle');
+      }
       ultimoPeticion = null;
       recalcularNube(true);
     });
     document.addEventListener('keydown', function (ev) {
-      if (!modoCalle) return;
       var usada = true;
       switch (ev.key) {
         case 'ArrowLeft': girar(-5, 0); break;
@@ -955,12 +1095,18 @@
           altitudNube = clamp(altitudNube + 100, 1200, 3000);
           slider.value = altitudNube;
           elAltValor.textContent = altitudNube.toLocaleString('es-ES');
+          if (!modoCalle) {
+            fijarEstado('Altitud guardada, se aplica al bajar a la calle');
+          }
           ultimoPeticion = null; recalcularNube(true);
           break;
         case 'PageDown':
           altitudNube = clamp(altitudNube - 100, 1200, 3000);
           slider.value = altitudNube;
           elAltValor.textContent = altitudNube.toLocaleString('es-ES');
+          if (!modoCalle) {
+            fijarEstado('Altitud guardada, se aplica al bajar a la calle');
+          }
           ultimoPeticion = null; recalcularNube(true);
           break;
         default: usada = false;
@@ -970,19 +1116,25 @@
   }
 
   // =========================================================================
-  // Arranque: vista aérea primero, con el mapa a la vista
+  // Arranque: el globo entero con la capa de nubes del satélite ya puesta.
+  // La navegación es libre (arrastrar, rueda, inclinar) y al bajar hasta
+  // el suelo la calle se activa sola, con edificios 3D y la nube arriba.
   // =========================================================================
   function arrancar() {
     initViewer();
     initControles();
-    vistaAerea();
     aseguraCapaAerea();
-    fijarEstado('Cargando mapa, edificios y nubes reales del satélite');
+    vistaAerea(ALT_GLOBAL);
+    fijarEstado('Cargando la elevacion del terreno');
     cargarElevacion(centro.lat, centro.lon)
-      .then(function () { return cargarEdificios(centro.lat, centro.lon); })
       .catch(function () {})
       .then(function () {
-        fijarEstado('Nubes reales del satélite · pulsa Bajar a la calle');
+        fijarEstado('Cargando edificios cercanos');
+        return cargarEdificios(centro.lat, centro.lon);
+      })
+      .catch(function () {})
+      .then(function () {
+        fijarEstado('Mapa global con las nubes del satélite · baja con la rueda hasta la calle y mira arriba');
       });
   }
 
