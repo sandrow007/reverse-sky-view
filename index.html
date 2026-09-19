@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Manolit∞ Nubes</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet"
+  <link rel="stylesheet" id="cesiumCss"
         href="https://cesium.com/downloads/cesiumjs/releases/1.122/Build/Cesium/Widgets/widgets.css">
   <style>
     :root {
@@ -13,7 +13,8 @@
       --tinta: #e8ecf4;
       --cian: #00f0ff;
       --violeta: #7b2fff;
-      --panel: rgba(8, 12, 28, 0.88);
+      --panel: rgba(8, 12, 28, 0.92);
+      --borde: rgba(0, 240, 255, 0.28);
     }
     html, body {
       margin: 0;
@@ -25,99 +26,199 @@
       color: var(--tinta);
       font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
     }
-    #cesiumContainer {
+    #cesiumContainer { position: absolute; inset: 0; }
+
+    /* ---------- cabecera ---------- */
+    #cabecera {
       position: absolute;
-      inset: 0;
-    }
-    #hud {
-      position: absolute;
-      top: 12px;
-      left: 12px;
-      z-index: 10;
+      top: 0; left: 0; right: 0;
+      z-index: 20;
       display: flex;
-      flex-direction: column;
-      gap: 8px;
-      max-width: 320px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 14px;
+      background: linear-gradient(180deg, rgba(3,5,15,0.92), rgba(3,5,15,0));
+      pointer-events: none;
     }
-    #panel {
-      background: var(--panel);
-      border: 1px solid rgba(0, 240, 255, 0.25);
-      border-radius: 12px;
-      padding: 12px 14px;
-      backdrop-filter: blur(6px);
-    }
-    #panel h1 {
-      margin: 0 0 4px;
-      font-size: 15px;
-      font-weight: 600;
-      letter-spacing: 0.4px;
+    #cabecera > * { pointer-events: auto; }
+    #titulo {
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 0.6px;
       color: var(--cian);
+      text-shadow: 0 0 12px rgba(0,240,255,0.45);
+      white-space: nowrap;
     }
     #estado {
       font-size: 12px;
-      line-height: 1.5;
+      line-height: 1.45;
+      text-align: right;
       color: var(--tinta);
-      min-height: 36px;
+      opacity: 0.92;
+      max-width: 46vw;
     }
-    #botones {
+
+    /* ---------- panel de control ---------- */
+    #panel {
+      position: absolute;
+      top: 64px;
+      right: 12px;
+      z-index: 20;
+      width: 250px;
+      background: var(--panel);
+      border: 1px solid var(--borde);
+      border-radius: 14px;
+      padding: 14px;
+      backdrop-filter: blur(8px);
       display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin-top: 8px;
+      flex-direction: column;
+      gap: 10px;
     }
-    #botones button {
-      min-height: 34px;
-      padding: 6px 12px;
-      font-size: 12px;
+    #panel .grupo { display: flex; flex-direction: column; gap: 8px; }
+    #panel .fila { display: flex; gap: 8px; }
+    .btn {
+      flex: 1;
+      min-height: 40px;
+      padding: 8px 10px;
+      font-size: 13px;
+      font-weight: 600;
       color: var(--tinta);
-      background: rgba(123, 47, 255, 0.18);
-      border: 1px solid rgba(123, 47, 255, 0.55);
-      border-radius: 8px;
+      background: rgba(123, 47, 255, 0.20);
+      border: 1px solid rgba(123, 47, 255, 0.60);
+      border-radius: 10px;
       cursor: pointer;
       touch-action: manipulation;
+      transition: background 0.15s, border-color 0.15s;
     }
-    #botones button:hover,
-    #botones button:focus-visible {
-      background: rgba(0, 240, 255, 0.18);
+    .btn:hover, .btn:focus-visible {
+      background: rgba(0, 240, 255, 0.20);
       border-color: var(--cian);
       outline: none;
     }
+    .btn.primario {
+      background: rgba(0, 240, 255, 0.22);
+      border-color: var(--cian);
+      font-size: 14px;
+      min-height: 46px;
+    }
+    .btn:disabled { opacity: 0.45; cursor: default; }
+
+    label.slider, label.campo {
+      font-size: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      color: var(--tinta);
+    }
+    label.slider .valor { color: var(--cian); font-weight: 600; }
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--cian);
+      cursor: pointer;
+    }
+    select {
+      width: 100%;
+      min-height: 38px;
+      font-size: 13px;
+      color: var(--tinta);
+      background: rgba(8, 12, 28, 0.95);
+      border: 1px solid var(--borde);
+      border-radius: 10px;
+      padding: 6px 8px;
+      cursor: pointer;
+    }
+    #lectura {
+      font-size: 11px;
+      line-height: 1.5;
+      color: rgba(232, 236, 244, 0.78);
+      font-variant-numeric: tabular-nums;
+    }
+
+    #ayuda {
+      font-size: 11px;
+      line-height: 1.55;
+      color: rgba(232, 236, 244, 0.72);
+      border-top: 1px solid rgba(0, 240, 255, 0.15);
+      padding-top: 8px;
+    }
+    #leyenda-fecha { font-size: 11px; color: rgba(232,236,244,0.85); }
+
     #cargando {
       position: absolute;
       bottom: 18px;
       left: 50%;
       transform: translateX(-50%);
-      z-index: 10;
+      z-index: 25;
       font-size: 12px;
-      padding: 8px 16px;
+      padding: 8px 18px;
       border-radius: 999px;
       background: var(--panel);
-      border: 1px solid rgba(0, 240, 255, 0.25);
+      border: 1px solid var(--borde);
       display: none;
+      white-space: nowrap;
     }
     #cargando.visible { display: block; }
-    .cesium-viewer-bottom { display: none; }
+
+    .cesium-viewer-bottom { display: none !important; }
+
+    @media (max-width: 640px) {
+      #panel { width: 210px; top: 56px; padding: 10px; }
+      #estado { max-width: 40vw; font-size: 11px; }
+      #titulo { font-size: 14px; }
+    }
   </style>
 <base target="_blank">
 </head>
 <body>
   <div id="cesiumContainer"></div>
 
-  <div id="hud">
-    <div id="panel">
-      <h1>Manolit∞ Nubes</h1>
-      <div id="estado" aria-live="polite">Preparando el visor</div>
-      <div id="botones">
-        <button id="btn-posicion" type="button">Mi posición</button>
-        <button id="btn-aerea" type="button">Vista aérea</button>
-        <button id="btn-calle" type="button">Vista calle</button>
+  <div id="cabecera">
+    <div id="titulo">Manolit∞ Nubes</div>
+    <div id="estado" aria-live="polite">Cargando el visor</div>
+  </div>
+
+  <div id="panel">
+    <div class="grupo">
+      <button id="btn-modo" class="btn primario" type="button">Bajar a la calle</button>
+      <div class="fila">
+        <button id="btn-posicion" class="btn" type="button">Mi posición</button>
+        <button id="btn-recalcular" class="btn" type="button">Recalcular nube</button>
       </div>
+    </div>
+
+    <label class="slider">
+      Altitud de la banda de nubes
+      <span><span class="valor" id="alt-valor">2.000</span> metros</span>
+      <input id="slider-alt" type="range" min="1200" max="3000" step="50" value="2000">
+    </label>
+
+    <label class="campo">
+      Ciudad
+      <select id="sel-ciudad">
+        <option value="37.39651,-5.99347" selected>Sevilla · Alameda</option>
+        <option value="37.38863,-5.98233">Sevilla · Triana</option>
+        <option value="40.41678,-3.70379">Madrid · Sol</option>
+        <option value="41.38740,2.16860">Barcelona · Plaza de Cataluña</option>
+        <option value="39.46991,-0.37629">Valencia · Ayuntamiento</option>
+        <option value="43.26301,-2.93499">Bilbao · Arriaga</option>
+        <option value="36.72126,-4.42128">Málaga · Malagueta</option>
+      </select>
+    </label>
+
+    <div id="lectura">37.3965 N · 5.9935 O · giro 0° · inclinación 18°</div>
+
+    <div id="leyenda-fecha">Buscando la imagen de satélite más reciente</div>
+
+    <div id="ayuda">
+      Arrastra para mirar · Rueda para acercar ·
+      Flechas del cursor para girar · RePág/AvPág para la altitud
     </div>
   </div>
 
   <div id="cargando">Actualizando la nube</div>
 
   <script src="https://cesium.com/downloads/cesiumjs/releases/1.122/Build/Cesium/Cesium.js"></script>
-  <script src="/clouds.js"></script>
+  <script src="./clouds.js"></script>
 </body>
 </html>
